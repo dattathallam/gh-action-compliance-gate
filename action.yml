@@ -40,7 +40,12 @@ runs:
         API_BASE: ${{ inputs.api-base-url }}
         SELF_REPO: gh-action-compliance-gate
       run: |
-        set -uo pipefail
+        # GitHub runs composite bash steps with errexit (-e) on. gacpm intentionally
+        # returns non-zero for unresolvable refs (e.g. 404 for a dep with no semver tags),
+        # so disable errexit and branch on the reported status instead of aborting.
+        set -u
+        set -o pipefail
+        set +e
         FILTER_URL="${API_BASE%/}/filterVersions"
         CURATION_URL="${API_BASE%/}/curation"
         ACTIONS_DIR="$(dirname "$RUNNER_WORKSPACE")/_actions"

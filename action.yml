@@ -1,0 +1,148 @@
+name: 'Compliance Gate'
+description: 'Resolves third-party actions on the runner to compliant versions (gacpm + curation APIs) and enforces them on disk; fails the workflow if a selected version is rejected.'
+inputs:
+  github-token:
+    description: 'GitHub token used by gacpm/gh to read tags and download zipballs'
+    required: false
+    default: ${{ github.token }}
+  api-base-url:
+    description: 'Base URL of the curation mock server (exposes /filterVersions and /curation)'
+    required: false
+    default: 'https://e59e-167-103-74-205.ngrok-free.app'
+runs:
+  using: 'composite'
+  steps:
+    # Step 1: the runner must already have gacpm (built from gh-action-compliance), gh, jq, curl.
+    - name: Preflight tooling
+      shell: bash
+      run: |
+        missing=0
+        for tool in gacpm gh jq curl; do
+          if ! command -v "$tool" >/dev/null 2>&1; then
+            echo "::error::required tool '$tool' not found on PATH"
+            missing=1
+          fi
+        done
+        if [ "$missing" -ne 0 ]; then
+          echo "Install gacpm on the runner once:" >&2
+          echo "  cd /path/to/gh-action-compliance && go build -o gacpm ./cmd/gacpm" >&2
+          echo "  sudo cp gacpm /usr/local/bin/gacpm" >&2
+          exit 1
+        fi
+        echo "preflight OK: gacpm, gh, jq, curl present"
+
+    # Step 2: scan _work/_actions, resolve+filter+curate each third-party action, enforce the
+    # approved version on disk, and fail the job if anything is non-compliant.
+    - name: Scan, gate, and enforce
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        API_BASE: ${{ inputs.api-base-url }}
+        SELF_REPO: gh-action-compliance-gate
+      run: |
+        set -uo pipefail
+        FILTER_URL="${API_BASE%/}/filterVersions"
+        CURATION_URL="${API_BASE%/}/curation"
+        ACTIONS_DIR="$(dirname "$RUNNER_WORKSPACE")/_actions"
+
+        echo "Scanning $ACTIONS_DIR for third-party actions..."
+        if [ ! -d "$ACTIONS_DIR" ]; then
+          echo "No _actions directory found; nothing to gate."
+          exit 0
+        fi
+
+        verdicts="$(mktemp)"
+
+        # Process substitution keeps the loop in the current shell (so verdicts persist).
+        while IFS= read -r ref_dir; do
+          owner=$(basename "$(dirname "$(dirname "$ref_dir")")")
+          repo=$(basename "$(dirname "$ref_dir")")
+          ref=$(basename "$ref_dir")
+          pkg="$owner/$repo"
+
+          # Ignore GitHub-native actions and the gate's own action.
+          case "$owner" in
+            actions|github) echo "skip native $pkg@$ref"; continue ;;
+          esac
+          if [ "$repo" = "$SELF_REPO" ]; then
+            echo "skip self $pkg@$ref"; continue
+          fi
+
+          echo "::group::$pkg@$ref"
+
+          # (1) Resolve all versions via the package manager. Retry a few times to
+          # ride out transient gh network blips on gacpm's auth call.
+          list_json=""
+          status=""
+          for attempt in 1 2 3; do
+            list_json=$(gacpm list "$pkg@$ref" 2>/dev/null)
+            status=$(printf '%s' "$list_json" | jq -r '.status // empty' 2>/dev/null)
+            [ "$status" = "200" ] && break
+            echo "gacpm list attempt $attempt for $pkg@$ref: status=${status:-none}; retrying"
+            sleep 2
+          done
+          if [ "$status" != "200" ]; then
+            echo "WARN: gacpm could not resolve $pkg@$ref (status=${status:-none}); skipping"
+            printf '%s' "$list_json" | jq -r '.error // empty' 2>/dev/null
+            echo "::endgroup::"
+            continue
+          fi
+
+          # (2) Build [[downloadUrl, version], ...] for the filter API.
+          pairs=$(printf '%s' "$list_json" | jq -c '[.versions[] | [.downloadUrl, .version]]')
+          echo "candidates: $(printf '%s' "$list_json" | jq -c '[.versions[].version]')"
+
+          # (3) filterVersions -> blocked_versions.
+          filter_body=$(jq -nc --arg pkg "$pkg" --argjson versions "$pairs" '{package:$pkg, versions:$versions}')
+          filter_resp=$(curl -s -X POST "$FILTER_URL" -H 'Content-Type: application/json' -d "$filter_body")
+          blocked=$(printf '%s' "$filter_resp" | jq -c '.blocked_versions // []' 2>/dev/null || echo '[]')
+          echo "blocked: $blocked"
+
+          # (4) Remove blocked versions, pick the 0th (latest) remaining.
+          picked=$(jq -nc --argjson pairs "$pairs" --argjson blocked "$blocked" \
+            '$pairs | map(select(.[1] as $v | ($blocked | index($v)) | not)) | .[0] // empty')
+          if [ -z "$picked" ] || [ "$picked" = "null" ]; then
+            echo "REJECTED $pkg@$ref: no compliant version after filtering"
+            echo "REJECTED $pkg@$ref no-compliant-version" >> "$verdicts"
+            echo "::endgroup::"
+            continue
+          fi
+          picked_url=$(printf '%s' "$picked" | jq -r '.[0]')
+          picked_ver=$(printf '%s' "$picked" | jq -r '.[1]')
+          echo "selected: $picked_ver"
+
+          # (5) curation -> approve (200) or reject (403).
+          cur_body=$(jq -nc --arg pkg "$pkg" --arg url "$picked_url" '{package:$pkg, downloadUrl:$url}')
+          cur_out="$(mktemp)"
+          cur_code=$(curl -s -o "$cur_out" -w "%{http_code}" -X POST "$CURATION_URL" -H 'Content-Type: application/json' -d "$cur_body")
+          cur_resp=$(cat "$cur_out"); rm -f "$cur_out"
+          if [ "$cur_code" != "200" ]; then
+            echo "REJECTED $pkg@$ref: curation $cur_code $cur_resp"
+            echo "REJECTED $pkg@$ref curation-$cur_code" >> "$verdicts"
+            echo "::endgroup::"
+            continue
+          fi
+          echo "APPROVED $pkg@$ref -> $picked_ver"
+
+          # (6) Enforce: replace the on-disk action with the approved version's contents.
+          echo "enforcing $picked_ver into $ref_dir"
+          find "$ref_dir" -mindepth 1 -delete
+          install_out="$(mktemp)"
+          if gacpm install --dest "$ref_dir" "$pkg@$picked_ver" >"$install_out" 2>&1; then
+            echo "installed $picked_ver into $ref_dir"
+            echo "APPROVED $pkg@$ref $picked_ver" >> "$verdicts"
+          else
+            echo "ERROR installing $picked_ver:"; cat "$install_out"
+            echo "REJECTED $pkg@$ref install-failed" >> "$verdicts"
+          fi
+          rm -f "$install_out"
+          echo "::endgroup::"
+        done < <(find "$ACTIONS_DIR" -mindepth 3 -maxdepth 3 -type d)
+
+        echo "=== compliance summary ==="
+        cat "$verdicts" 2>/dev/null || true
+        if grep -q '^REJECTED' "$verdicts" 2>/dev/null; then
+          echo "::error::compliance gate failed — one or more actions are non-compliant"
+          exit 1
+        fi
+        echo "compliance gate passed"

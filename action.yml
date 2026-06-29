@@ -41,21 +41,47 @@ runs:
         REPO="${GITHUB_REPOSITORY}"
         API="https://api.github.com"
 
-        echo "Fetching Actions permissions for $REPO..."
-        perms_resp=$(curl -sf \
-          -H "Authorization: Bearer $GH_TOKEN" \
-          -H "Accept: application/vnd.github+json" \
-          "$API/repos/$REPO/actions/permissions")
+        # Wrapper: retries curl up to 3 times with a 15 s timeout per attempt.
+        # Prints the response body to stdout; returns non-zero on all-attempts failure.
+        gh_api_get() {
+          local url="$1"
+          local attempt resp http_code
+          for attempt in 1 2 3; do
+            resp=$(curl -s --max-time 15 \
+              -w "\n%{http_code}" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "$url" 2>/dev/null) || {
+              echo "::warning::curl network error on attempt $attempt for $url (exit $?)" >&2
+              sleep 3; continue
+            }
+            http_code=$(printf '%s' "$resp" | tail -n1)
+            body=$(printf '%s' "$resp" | sed '$d')
+            if [ "$http_code" = "200" ]; then
+              printf '%s' "$body"
+              return 0
+            fi
+            echo "::warning::GitHub API returned HTTP $http_code on attempt $attempt for $url" >&2
+            sleep 3
+          done
+          return 1
+        }
 
-        allowed_actions=$(printf '%s' "$perms_resp" | jq -r '.allowed_actions // "all"')
+        echo "Fetching Actions permissions for $REPO..."
+        if ! perms_resp=$(gh_api_get "$API/repos/$REPO/actions/permissions"); then
+          echo "::warning::Could not reach GitHub API; defaulting allowed_actions to 'all'"
+          allowed_actions="all"
+        else
+          allowed_actions=$(printf '%s' "$perms_resp" | jq -r '.allowed_actions // "all"')
+        fi
         echo "allowed_actions policy: $allowed_actions"
 
         patterns='[]'
         if [ "$allowed_actions" = "selected" ]; then
-          selected_resp=$(curl -sf \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "$API/repos/$REPO/actions/permissions/selected-actions")
+          if ! selected_resp=$(gh_api_get "$API/repos/$REPO/actions/permissions/selected-actions"); then
+            echo "::error::Policy is 'selected' but could not fetch patterns_allowed from GitHub API"
+            exit 1
+          fi
           patterns=$(printf '%s' "$selected_resp" | jq -c '.patterns_allowed // []')
           echo "allowed patterns: $patterns"
         fi

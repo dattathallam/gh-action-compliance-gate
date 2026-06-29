@@ -80,35 +80,53 @@ runs:
         }
 
         echo "Fetching Actions permissions for $REPO..."
+        sha_pinning_required='false'
         if ! perms_resp=$(gh_api_get "$API/repos/$REPO/actions/permissions"); then
           case "$GH_API_HTTP_CODE" in
-            403) echo "::warning::Token lacks 'administration: read' permission — add it to your workflow's permissions block. Defaulting allowed_actions to 'all'." ;;
-            401) echo "::warning::Token is invalid or expired for GitHub API. Defaulting allowed_actions to 'all'." ;;
+            403) echo "::warning::Token lacks repo admin permission — cannot read Actions policy. Defaulting allowed_actions to 'all'." ;;
+            401) echo "::warning::Token is invalid or expired. Defaulting allowed_actions to 'all'." ;;
             404) echo "::warning::Repo not found or Actions disabled for $REPO. Defaulting allowed_actions to 'all'." ;;
             *)   echo "::warning::Could not reach GitHub API (HTTP ${GH_API_HTTP_CODE:-network error}). Defaulting allowed_actions to 'all'." ;;
           esac
           allowed_actions="all"
         else
           allowed_actions=$(printf '%s' "$perms_resp" | jq -r '.allowed_actions // "all"')
+          sha_pinning_required=$(printf '%s' "$perms_resp" | jq -r '.sha_pinning_required // false')
         fi
         echo "allowed_actions policy: $allowed_actions"
+        echo "sha_pinning_required: $sha_pinning_required"
 
         patterns='[]'
+        github_owned_allowed='false'
+        verified_allowed='false'
         if [ "$allowed_actions" = "selected" ]; then
           if ! selected_resp=$(gh_api_get "$API/repos/$REPO/actions/permissions/selected-actions"); then
-            echo "::error::Policy is 'selected' but could not fetch patterns_allowed (HTTP ${GH_API_HTTP_CODE:-network error}). Cannot enforce allow list."
+            echo "::error::Policy is 'selected' but could not fetch selected-actions (HTTP ${GH_API_HTTP_CODE:-network error}). Cannot enforce allow list."
             exit 1
           fi
+          github_owned_allowed=$(printf '%s' "$selected_resp" | jq -r '.github_owned_allowed // false')
+          verified_allowed=$(printf '%s' "$selected_resp" | jq -r '.verified_allowed // false')
           patterns=$(printf '%s' "$selected_resp" | jq -c '.patterns_allowed // []')
-          echo "allowed patterns: $patterns"
+          echo "github_owned_allowed: $github_owned_allowed"
+          echo "verified_allowed: $verified_allowed"
+          echo "patterns_allowed: $patterns"
         fi
 
-        # Write to a temp file so the scan step can consume it.
         jq -nc \
-          --arg allowed_actions "$allowed_actions" \
-          --argjson patterns "$patterns" \
-          '{allowed_actions: $allowed_actions, patterns: $patterns}' \
-          > "$RUNNER_TEMP/gh_allowed_patterns.json"
+          --arg  allowed_actions      "$allowed_actions" \
+          --arg  repo_owner           "$GITHUB_REPOSITORY_OWNER" \
+          --argjson github_owned_allowed "$github_owned_allowed" \
+          --argjson verified_allowed     "$verified_allowed" \
+          --argjson patterns             "$patterns" \
+          --argjson sha_pinning_required "$sha_pinning_required" \
+          '{
+            allowed_actions:      $allowed_actions,
+            repo_owner:           $repo_owner,
+            github_owned_allowed: $github_owned_allowed,
+            verified_allowed:     $verified_allowed,
+            patterns:             $patterns,
+            sha_pinning_required: $sha_pinning_required
+          }' > "$RUNNER_TEMP/gh_allowed_patterns.json"
         echo "allow list saved to $RUNNER_TEMP/gh_allowed_patterns.json"
 
     # Step 3: scan _work/_actions, resolve+filter+curate each third-party action, enforce the
@@ -130,11 +148,18 @@ runs:
         CURATION_URL="${API_BASE%/}/curation"
         ACTIONS_DIR="$(dirname "$RUNNER_WORKSPACE")/_actions"
 
-        # Load allow list fetched in the previous step.
+        # Load policy fetched in the previous step.
         allow_list="$RUNNER_TEMP/gh_allowed_patterns.json"
-        gh_allowed_actions=$(jq -r '.allowed_actions' "$allow_list")
-        gh_patterns=$(jq -c '.patterns' "$allow_list")
-        echo "GitHub Actions policy: allowed_actions=$gh_allowed_actions"
+        gh_allowed_actions=$(jq -r  '.allowed_actions'      "$allow_list")
+        gh_repo_owner=$(jq -r       '.repo_owner'           "$allow_list")
+        gh_github_owned=$(jq -r     '.github_owned_allowed' "$allow_list")
+        gh_verified=$(jq -r         '.verified_allowed'     "$allow_list")
+        gh_patterns=$(jq -c         '.patterns'             "$allow_list")
+        gh_sha_pinning=$(jq -r      '.sha_pinning_required' "$allow_list")
+        echo "GitHub Actions policy: allowed_actions=$gh_allowed_actions sha_pinning_required=$gh_sha_pinning"
+
+        # is_sha_ref returns 0 if the given ref looks like a full 40-char commit SHA.
+        is_sha_ref() { [[ "$1" =~ ^[0-9a-fA-F]{40}$ ]]; }
 
         echo "Scanning $ACTIONS_DIR for third-party actions..."
         if [ ! -d "$ACTIONS_DIR" ]; then
@@ -151,7 +176,7 @@ runs:
           ref=$(basename "$ref_dir")
           pkg="$owner/$repo"
 
-          # Ignore GitHub-native actions and the gate's own action.
+          # Skip GitHub-native actions and this gate's own action.
           case "$owner" in
             actions|github) echo "skip native $pkg@$ref"; continue ;;
           esac
@@ -159,29 +184,85 @@ runs:
             echo "skip self $pkg@$ref"; continue
           fi
 
+          # --- SHA pinning check ---
+          # Must run before allow-list so a pinning violation is always surfaced.
+          if [ "$gh_sha_pinning" = "true" ] && ! is_sha_ref "$ref"; then
+            echo "REJECTED $pkg@$ref: repo policy requires actions pinned to a full commit SHA"
+            echo "REJECTED $pkg@$ref sha-pinning-required" >> "$verdicts"
+            continue
+          fi
+
           # --- GitHub Actions allow-list check ---
-          # Reject immediately if the repo policy forbids all third-party actions.
           if [ "$gh_allowed_actions" = "local_only" ]; then
             echo "REJECTED $pkg@$ref: GitHub policy allows local actions only"
             echo "REJECTED $pkg@$ref github-policy-local-only" >> "$verdicts"
             continue
           fi
-          # When the policy is "selected", verify the action appears in patterns_allowed.
+
           if [ "$gh_allowed_actions" = "selected" ]; then
             is_allowed=0
+
+            # (a) Same-owner actions are implicitly allowed.
+            # The "Allow <owner> and select non-<owner>" policy never lists the owner's
+            # own actions in patterns_allowed; they are unconditionally permitted.
+            if [ "$owner" = "$gh_repo_owner" ]; then
+              is_allowed=1
+              echo "allow-list OK (same owner): $pkg@$ref"
+            fi
+
+            # (b) GitHub-owned actions (actions/*, github/*) — controlled by github_owned_allowed.
+            # These are already skipped above but guard here for correctness.
+            if [ "$is_allowed" -eq 0 ] && [ "$gh_github_owned" = "true" ]; then
+              case "$owner" in
+                actions|github) is_allowed=1; echo "allow-list OK (github_owned_allowed): $pkg@$ref" ;;
+              esac
+            fi
+
+            # (c) Marketplace verified creators — controlled by verified_allowed.
+            # The API does not expose a machine-readable verified-creator list, so when
+            # verified_allowed=true we allow any action not explicitly blocked by a ! pattern.
+            # The filterVersions + curation steps still apply as a second layer of control.
+            if [ "$is_allowed" -eq 0 ] && [ "$gh_verified" = "true" ]; then
+              is_allowed=1
+              echo "allow-list OK (verified_allowed=true, subject to block patterns): $pkg@$ref"
+            fi
+
+            # (d) Explicit patterns_allowed entries.
+            # Entries prefixed with ! are block rules and take precedence over any allow above.
+            is_blocked=0
             while IFS= read -r pattern; do
-              pat_pkg="${pattern%%@*}"
-              pat_ref="${pattern#*@}"
-              if [ "$pat_pkg" = "$pkg" ] && { [ "$pat_ref" = "*" ] || [ "$pat_ref" = "$ref" ]; }; then
-                is_allowed=1
-                break
+              if [[ "$pattern" == "!"* ]]; then
+                # Block pattern: strip the ! and match.
+                block_pkg="${pattern#!}"; block_pkg="${block_pkg%%@*}"
+                block_ref="${pattern#*@}"
+                if [ "$block_pkg" = "$pkg" ] && { [ "$block_ref" = "*" ] || [ "$block_ref" = "$ref" ]; }; then
+                  is_blocked=1
+                  break
+                fi
+              else
+                # Allow pattern: only checked when not yet allowed.
+                if [ "$is_allowed" -eq 0 ]; then
+                  pat_pkg="${pattern%%@*}"
+                  pat_ref="${pattern#*@}"
+                  if [ "$pat_pkg" = "$pkg" ] && { [ "$pat_ref" = "*" ] || [ "$pat_ref" = "$ref" ]; }; then
+                    is_allowed=1
+                  fi
+                fi
               fi
             done < <(printf '%s' "$gh_patterns" | jq -r '.[]')
+
+            if [ "$is_blocked" -eq 1 ]; then
+              echo "REJECTED $pkg@$ref: explicitly blocked by patterns_allowed entry"
+              echo "REJECTED $pkg@$ref github-explicitly-blocked" >> "$verdicts"
+              continue
+            fi
+
             if [ "$is_allowed" -eq 0 ]; then
               echo "REJECTED $pkg@$ref: not in GitHub Actions allow list"
               echo "REJECTED $pkg@$ref github-not-allowed" >> "$verdicts"
               continue
             fi
+
             echo "allow-list OK: $pkg@$ref"
           fi
 
@@ -210,6 +291,17 @@ runs:
           echo "candidates: $(printf '%s' "$list_json" | jq -c '[.versions[].version]')"
 
           # (3) filterVersions -> blocked_versions.
+          # Remove versions explicitly blocked by GitHub's patterns_allowed
+          # (e.g. "!mikefarah/yq@v4.53.2") before sending to the curation API
+          # so the server never sees versions the repo policy already rejects.
+          gh_pkg_blocked=$(printf '%s' "$gh_patterns" | jq -c \
+            --arg pkg "$pkg" \
+            '[.[] | select(startswith("!")) | ltrimstr("!") | select(split("@")[0] == $pkg) | split("@")[1]]')
+          pairs=$(jq -nc \
+            --argjson pairs "$pairs" \
+            --argjson gh_blocked "$gh_pkg_blocked" \
+            '$pairs | map(select(.[1] as $v | ($gh_blocked | index($v)) | not))')
+          echo "candidates after github block filter: $(printf '%s' "$pairs" | jq -c '[.[].1]')"
           filter_body=$(jq -nc --arg pkg "$pkg" --argjson versions "$pairs" '{package:$pkg, versions:$versions}')
           filter_resp=$(curl -s -X POST "$FILTER_URL" -H 'Content-Type: application/json' -d "$filter_body")
           blocked=$(printf '%s' "$filter_resp" | jq -c '.blocked_versions // []' 2>/dev/null || echo '[]')

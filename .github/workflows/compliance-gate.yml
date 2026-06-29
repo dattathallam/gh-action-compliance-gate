@@ -1,0 +1,20 @@
+name: Compliance Gate
+
+on:
+  workflow_call:
+    inputs:
+      api-base-url:
+        description: 'Base URL of the curation server (exposes /filterVersions and /curation)'
+        required: false
+        type: string
+        default: 'https://bc8d-167-103-72-120.ngrok-free.app'
+
+jobs:
+  compliance:
+    runs-on: self-hosted
+    steps:
+      - name: Run compliance gate
+        uses: dattathallam/gh-action-compliance-gate@main
+        with:
+          github-token: ${{ secrets.ADMIN_READ_PAT }}
+          api-base-url: ${{ inputs.api-base-url }}

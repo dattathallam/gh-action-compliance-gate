@@ -8,7 +8,7 @@ inputs:
   api-base-url:
     description: 'Base URL of the curation mock server (exposes /filterVersions and /curation)'
     required: false
-    default: 'https://e59e-167-103-74-205.ngrok-free.app'
+    default: 'https://bc8d-167-103-72-120.ngrok-free.app'
 runs:
   using: 'composite'
   steps:
@@ -31,7 +31,44 @@ runs:
         fi
         echo "preflight OK: gacpm, gh, jq, curl present"
 
-    # Step 2: scan _work/_actions, resolve+filter+curate each third-party action, enforce the
+    # Step 2: fetch the allow/block list configured in this repo's GitHub Actions settings.
+    - name: Fetch GitHub Actions allow list
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        REPO="${GITHUB_REPOSITORY}"
+        API="https://api.github.com"
+
+        echo "Fetching Actions permissions for $REPO..."
+        perms_resp=$(curl -sf \
+          -H "Authorization: Bearer $GH_TOKEN" \
+          -H "Accept: application/vnd.github+json" \
+          "$API/repos/$REPO/actions/permissions")
+
+        allowed_actions=$(printf '%s' "$perms_resp" | jq -r '.allowed_actions // "all"')
+        echo "allowed_actions policy: $allowed_actions"
+
+        patterns='[]'
+        if [ "$allowed_actions" = "selected" ]; then
+          selected_resp=$(curl -sf \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "$API/repos/$REPO/actions/permissions/selected-actions")
+          patterns=$(printf '%s' "$selected_resp" | jq -c '.patterns_allowed // []')
+          echo "allowed patterns: $patterns"
+        fi
+
+        # Write to a temp file so the scan step can consume it.
+        jq -nc \
+          --arg allowed_actions "$allowed_actions" \
+          --argjson patterns "$patterns" \
+          '{allowed_actions: $allowed_actions, patterns: $patterns}' \
+          > "$RUNNER_TEMP/gh_allowed_patterns.json"
+        echo "allow list saved to $RUNNER_TEMP/gh_allowed_patterns.json"
+
+    # Step 3: scan _work/_actions, resolve+filter+curate each third-party action, enforce the
     # approved version on disk, and fail the job if anything is non-compliant.
     - name: Scan, gate, and enforce
       shell: bash
@@ -49,6 +86,12 @@ runs:
         FILTER_URL="${API_BASE%/}/filterVersions"
         CURATION_URL="${API_BASE%/}/curation"
         ACTIONS_DIR="$(dirname "$RUNNER_WORKSPACE")/_actions"
+
+        # Load allow list fetched in the previous step.
+        allow_list="$RUNNER_TEMP/gh_allowed_patterns.json"
+        gh_allowed_actions=$(jq -r '.allowed_actions' "$allow_list")
+        gh_patterns=$(jq -c '.patterns' "$allow_list")
+        echo "GitHub Actions policy: allowed_actions=$gh_allowed_actions"
 
         echo "Scanning $ACTIONS_DIR for third-party actions..."
         if [ ! -d "$ACTIONS_DIR" ]; then
@@ -71,6 +114,32 @@ runs:
           esac
           if [ "$repo" = "$SELF_REPO" ]; then
             echo "skip self $pkg@$ref"; continue
+          fi
+
+          # --- GitHub Actions allow-list check ---
+          # Reject immediately if the repo policy forbids all third-party actions.
+          if [ "$gh_allowed_actions" = "local_only" ]; then
+            echo "REJECTED $pkg@$ref: GitHub policy allows local actions only"
+            echo "REJECTED $pkg@$ref github-policy-local-only" >> "$verdicts"
+            continue
+          fi
+          # When the policy is "selected", verify the action appears in patterns_allowed.
+          if [ "$gh_allowed_actions" = "selected" ]; then
+            is_allowed=0
+            while IFS= read -r pattern; do
+              pat_pkg="${pattern%%@*}"
+              pat_ref="${pattern#*@}"
+              if [ "$pat_pkg" = "$pkg" ] && { [ "$pat_ref" = "*" ] || [ "$pat_ref" = "$ref" ]; }; then
+                is_allowed=1
+                break
+              fi
+            done < <(printf '%s' "$gh_patterns" | jq -r '.[]')
+            if [ "$is_allowed" -eq 0 ]; then
+              echo "REJECTED $pkg@$ref: not in GitHub Actions allow list"
+              echo "REJECTED $pkg@$ref github-not-allowed" >> "$verdicts"
+              continue
+            fi
+            echo "allow-list OK: $pkg@$ref"
           fi
 
           echo "::group::$pkg@$ref"

@@ -41,27 +41,39 @@ runs:
         REPO="${GITHUB_REPOSITORY}"
         API="https://api.github.com"
 
-        # Wrapper: retries curl up to 3 times with a 15 s timeout per attempt.
-        # Prints the response body to stdout; returns non-zero on all-attempts failure.
+        # Wrapper: retries curl up to 3 times (transient/5xx only) with a 15 s timeout.
+        # Prints the response body to stdout and returns 0 on HTTP 200.
+        # Returns 1 immediately on 401/403/404 — these are not transient.
+        # Sets GH_API_HTTP_CODE so callers can inspect the last status code.
+        GH_API_HTTP_CODE=""
         gh_api_get() {
           local url="$1"
-          local attempt resp http_code
+          local attempt resp curl_exit
+          GH_API_HTTP_CODE=""
           for attempt in 1 2 3; do
             resp=$(curl -s --max-time 15 \
               -w "\n%{http_code}" \
               -H "Authorization: Bearer $GH_TOKEN" \
               -H "Accept: application/vnd.github+json" \
-              "$url" 2>/dev/null) || {
-              echo "::warning::curl network error on attempt $attempt for $url (exit $?)" >&2
+              "$url" 2>/dev/null)
+            curl_exit=$?
+            if [ "$curl_exit" -ne 0 ]; then
+              echo "::warning::curl network error (exit $curl_exit) on attempt $attempt for $url" >&2
               sleep 3; continue
-            }
-            http_code=$(printf '%s' "$resp" | tail -n1)
+            fi
+            GH_API_HTTP_CODE=$(printf '%s' "$resp" | tail -n1)
             body=$(printf '%s' "$resp" | sed '$d')
-            if [ "$http_code" = "200" ]; then
+            if [ "$GH_API_HTTP_CODE" = "200" ]; then
               printf '%s' "$body"
               return 0
             fi
-            echo "::warning::GitHub API returned HTTP $http_code on attempt $attempt for $url" >&2
+            # 401/403/404 will not change on retry — bail immediately.
+            case "$GH_API_HTTP_CODE" in
+              401|403|404)
+                echo "::warning::GitHub API returned HTTP $GH_API_HTTP_CODE for $url (not retrying)" >&2
+                return 1 ;;
+            esac
+            echo "::warning::GitHub API returned HTTP $GH_API_HTTP_CODE on attempt $attempt for $url" >&2
             sleep 3
           done
           return 1
@@ -69,7 +81,12 @@ runs:
 
         echo "Fetching Actions permissions for $REPO..."
         if ! perms_resp=$(gh_api_get "$API/repos/$REPO/actions/permissions"); then
-          echo "::warning::Could not reach GitHub API; defaulting allowed_actions to 'all'"
+          case "$GH_API_HTTP_CODE" in
+            403) echo "::warning::Token lacks 'administration: read' permission — add it to your workflow's permissions block. Defaulting allowed_actions to 'all'." ;;
+            401) echo "::warning::Token is invalid or expired for GitHub API. Defaulting allowed_actions to 'all'." ;;
+            404) echo "::warning::Repo not found or Actions disabled for $REPO. Defaulting allowed_actions to 'all'." ;;
+            *)   echo "::warning::Could not reach GitHub API (HTTP ${GH_API_HTTP_CODE:-network error}). Defaulting allowed_actions to 'all'." ;;
+          esac
           allowed_actions="all"
         else
           allowed_actions=$(printf '%s' "$perms_resp" | jq -r '.allowed_actions // "all"')
@@ -79,7 +96,7 @@ runs:
         patterns='[]'
         if [ "$allowed_actions" = "selected" ]; then
           if ! selected_resp=$(gh_api_get "$API/repos/$REPO/actions/permissions/selected-actions"); then
-            echo "::error::Policy is 'selected' but could not fetch patterns_allowed from GitHub API"
+            echo "::error::Policy is 'selected' but could not fetch patterns_allowed (HTTP ${GH_API_HTTP_CODE:-network error}). Cannot enforce allow list."
             exit 1
           fi
           patterns=$(printf '%s' "$selected_resp" | jq -c '.patterns_allowed // []')

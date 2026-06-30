@@ -9,6 +9,15 @@ inputs:
     description: 'Base URL of the curation mock server (exposes /filterVersions and /curation)'
     required: false
     default: 'https://bc8d-167-103-72-120.ngrok-free.app'
+  summary-level:
+    description: |
+      Controls which rows appear in the job summary table.
+      INFO (default): floating tags and branch refs only (e.g. @v1, @main); pinned SHA or absolute
+        semver rows (e.g. @v1.0.0, @abc123...) are omitted. Rejections and filter-blocked candidates
+        on floating refs are always shown.
+      DEBUG: every evaluated action is shown regardless of ref type.
+    required: false
+    default: 'INFO'
 runs:
   using: 'composite'
   steps:
@@ -137,6 +146,7 @@ runs:
         GH_TOKEN: ${{ inputs.github-token }}
         API_BASE: ${{ inputs.api-base-url }}
         SELF_REPO: gh-action-compliance-gate
+        SUMMARY_LEVEL: ${{ inputs.summary-level }}
       run: |
         # GitHub runs composite bash steps with errexit (-e) on. gacpm intentionally
         # returns non-zero for unresolvable refs (e.g. 404 for a dep with no semver tags),
@@ -160,6 +170,15 @@ runs:
 
         # is_sha_ref returns 0 if the given ref looks like a full 40-char commit SHA.
         is_sha_ref() { [[ "$1" =~ ^[0-9a-fA-F]{40}$ ]]; }
+
+        # is_floating_ref returns 0 if the ref is a floating tag or branch (not a pinned SHA
+        # or an absolute semver like v1.2.3). Used to decide INFO-level summary filtering.
+        is_floating_ref() {
+          local r="$1"
+          is_sha_ref "$r" && return 1                       # full SHA — pinned
+          [[ "$r" =~ ^v?[0-9]+\.[0-9]+\.[0-9] ]] && return 1  # vX.Y.Z — absolute semver
+          return 0                                          # vX, main, latest, etc. — floating
+        }
 
         # gate_action <owner> <repo> <ref> <ref_dir>
         # Checks one action: SHA pinning, allow-list, gacpm, filterVersions, curation.
@@ -301,6 +320,13 @@ runs:
           blocked=$(printf '%s' "$filter_resp" | jq -c '.blocked_versions // []' 2>/dev/null || echo '[]')
           echo "blocked: $blocked"
 
+          # Record each version screened out by filterVersions so the summary can show
+          # which candidates were considered but rejected before the final pick.
+          while IFS= read -r _bver; do
+            [ -z "$_bver" ] && continue
+            printf 'FILTERED\t%s\t%s\t%s\t\tfilter-blocked\n' "$pkg" "$ref" "$_bver" >> "$verdicts"
+          done < <(printf '%s' "$blocked" | jq -r '.[]' 2>/dev/null)
+
           # (4) Remove blocked versions, pick the 0th (latest) remaining.
           local picked picked_url picked_ver
           picked=$(jq -nc --argjson pairs "$pairs" --argjson blocked "$blocked" \
@@ -388,14 +414,20 @@ runs:
         cat "$verdicts" 2>/dev/null || true
 
         # Write a markdown summary table to the workflow job summary page.
+        # INFO: floating-ref rows + all rejections. DEBUG: every row.
         {
           echo "## Compliance Gate"
           echo ""
           echo "| Action | Requested | Selected Version | Commit SHA | Verdict |"
           echo "| --- | --- | --- | --- | --- |"
           while IFS=$'\t' read -r _status _pkg _ref _ver _sha _reason; do
+            # INFO mode: skip approved/filtered rows whose ref is already pinned (not floating).
+            if [ "${SUMMARY_LEVEL:-INFO}" = "INFO" ] && [ "$_status" != "REJECTED" ]; then
+              is_floating_ref "$_ref" || continue
+            fi
             case "$_status" in
               APPROVED) _badge="✅ Approved" ;;
+              FILTERED) _badge="⚠️ Filtered — \`$_reason\`" ;;
               REJECTED) _badge="❌ Rejected — \`$_reason\`" ;;
               *)        _badge="$_status" ;;
             esac

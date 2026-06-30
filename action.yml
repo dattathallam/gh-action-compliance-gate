@@ -161,46 +161,38 @@ runs:
         # is_sha_ref returns 0 if the given ref looks like a full 40-char commit SHA.
         is_sha_ref() { [[ "$1" =~ ^[0-9a-fA-F]{40}$ ]]; }
 
-        echo "Scanning $ACTIONS_DIR for third-party actions..."
-        if [ ! -d "$ACTIONS_DIR" ]; then
-          echo "No _actions directory found; nothing to gate."
-          exit 0
-        fi
-
-        verdicts="$(mktemp)"
-
-        # Process substitution keeps the loop in the current shell (so verdicts persist).
-        while IFS= read -r ref_dir; do
-          owner=$(basename "$(dirname "$(dirname "$ref_dir")")")
-          repo=$(basename "$(dirname "$ref_dir")")
-          ref=$(basename "$ref_dir")
-          pkg="$owner/$repo"
+        # gate_action <owner> <repo> <ref> <ref_dir>
+        # Checks one action: SHA pinning, allow-list, gacpm, filterVersions, curation.
+        # ref_dir: path to enforce on disk (enforcement mode). Empty = check-only, skip disk swap.
+        gate_action() {
+          local owner="$1" repo="$2" ref="$3" ref_dir="${4:-}"
+          local pkg="$owner/$repo"
 
           # Skip GitHub-native actions and this gate's own action.
           case "$owner" in
-            actions|github) echo "skip native $pkg@$ref"; continue ;;
+            actions|github) echo "skip native $pkg@$ref"; return 0 ;;
           esac
           if [ "$repo" = "$SELF_REPO" ]; then
-            echo "skip self $pkg@$ref"; continue
+            echo "skip self $pkg@$ref"; return 0
           fi
 
           # --- SHA pinning check ---
           # Must run before allow-list so a pinning violation is always surfaced.
           if [ "$gh_sha_pinning" = "true" ] && ! is_sha_ref "$ref"; then
             echo "REJECTED $pkg@$ref: repo policy requires actions pinned to a full commit SHA"
-            echo "REJECTED $pkg@$ref sha-pinning-required" >> "$verdicts"
-            continue
+            printf 'REJECTED\t%s\t%s\t\t\tsha-pinning-required\n' "$pkg" "$ref" >> "$verdicts"
+            return 0
           fi
 
           # --- GitHub Actions allow-list check ---
           if [ "$gh_allowed_actions" = "local_only" ]; then
             echo "REJECTED $pkg@$ref: GitHub policy allows local actions only"
-            echo "REJECTED $pkg@$ref github-policy-local-only" >> "$verdicts"
-            continue
+            printf 'REJECTED\t%s\t%s\t\t\tgithub-policy-local-only\n' "$pkg" "$ref" >> "$verdicts"
+            return 0
           fi
 
           if [ "$gh_allowed_actions" = "selected" ]; then
-            is_allowed=0
+            local is_allowed=0
 
             # (a) Same-owner actions are implicitly allowed.
             # The "Allow <owner> and select non-<owner>" policy never lists the owner's
@@ -229,12 +221,12 @@ runs:
 
             # (d) Explicit patterns_allowed entries.
             # Entries prefixed with ! are block rules and take precedence over any allow above.
-            is_blocked=0
+            local is_blocked=0
             while IFS= read -r pattern; do
               if [[ "$pattern" == "!"* ]]; then
                 # Block pattern: strip the ! and match.
-                block_pkg="${pattern#!}"; block_pkg="${block_pkg%%@*}"
-                block_ref="${pattern#*@}"
+                local block_pkg="${pattern#!}"; block_pkg="${block_pkg%%@*}"
+                local block_ref="${pattern#*@}"
                 if [ "$block_pkg" = "$pkg" ] && { [ "$block_ref" = "*" ] || [ "$block_ref" = "$ref" ]; }; then
                   is_blocked=1
                   break
@@ -242,8 +234,8 @@ runs:
               else
                 # Allow pattern: only checked when not yet allowed.
                 if [ "$is_allowed" -eq 0 ]; then
-                  pat_pkg="${pattern%%@*}"
-                  pat_ref="${pattern#*@}"
+                  local pat_pkg="${pattern%%@*}"
+                  local pat_ref="${pattern#*@}"
                   if [ "$pat_pkg" = "$pkg" ] && { [ "$pat_ref" = "*" ] || [ "$pat_ref" = "$ref" ]; }; then
                     is_allowed=1
                   fi
@@ -253,14 +245,14 @@ runs:
 
             if [ "$is_blocked" -eq 1 ]; then
               echo "REJECTED $pkg@$ref: explicitly blocked by patterns_allowed entry"
-              echo "REJECTED $pkg@$ref github-explicitly-blocked" >> "$verdicts"
-              continue
+              printf 'REJECTED\t%s\t%s\t\t\tgithub-explicitly-blocked\n' "$pkg" "$ref" >> "$verdicts"
+              return 0
             fi
 
             if [ "$is_allowed" -eq 0 ]; then
               echo "REJECTED $pkg@$ref: not in GitHub Actions allow list"
-              echo "REJECTED $pkg@$ref github-not-allowed" >> "$verdicts"
-              continue
+              printf 'REJECTED\t%s\t%s\t\t\tgithub-not-allowed\n' "$pkg" "$ref" >> "$verdicts"
+              return 0
             fi
 
             echo "allow-list OK: $pkg@$ref"
@@ -270,8 +262,7 @@ runs:
 
           # (1) Resolve all versions via the package manager. Retry a few times to
           # ride out transient gh network blips on gacpm's auth call.
-          list_json=""
-          status=""
+          local list_json="" status=""
           for attempt in 1 2 3; do
             list_json=$(gacpm list "$pkg@$ref" 2>/dev/null)
             status=$(printf '%s' "$list_json" | jq -r '.status // empty' 2>/dev/null)
@@ -283,10 +274,11 @@ runs:
             echo "WARN: gacpm could not resolve $pkg@$ref (status=${status:-none}); skipping"
             printf '%s' "$list_json" | jq -r '.error // empty' 2>/dev/null
             echo "::endgroup::"
-            continue
+            return 0
           fi
 
           # (2) Build [[downloadUrl, version], ...] for the filter API.
+          local pairs
           pairs=$(printf '%s' "$list_json" | jq -c '[.versions[] | [.downloadUrl, .version]]')
           echo "candidates: $(printf '%s' "$list_json" | jq -c '[.versions[].version]')"
 
@@ -294,6 +286,7 @@ runs:
           # Remove versions explicitly blocked by GitHub's patterns_allowed
           # (e.g. "!mikefarah/yq@v4.53.2") before sending to the curation API
           # so the server never sees versions the repo policy already rejects.
+          local gh_pkg_blocked
           gh_pkg_blocked=$(printf '%s' "$gh_patterns" | jq -c \
             --arg pkg "$pkg" \
             '[.[] | select(startswith("!")) | ltrimstr("!") | select(split("@")[0] == $pkg) | split("@")[1]]')
@@ -302,54 +295,115 @@ runs:
             --argjson gh_blocked "$gh_pkg_blocked" \
             '$pairs | map(select(.[1] as $v | ($gh_blocked | index($v)) | not))')
           echo "candidates after github block filter: $(printf '%s' "$pairs" | jq -c '[.[].1]')"
+          local filter_body filter_resp blocked
           filter_body=$(jq -nc --arg pkg "$pkg" --argjson versions "$pairs" '{package:$pkg, versions:$versions}')
           filter_resp=$(curl -s -X POST "$FILTER_URL" -H 'Content-Type: application/json' -d "$filter_body")
           blocked=$(printf '%s' "$filter_resp" | jq -c '.blocked_versions // []' 2>/dev/null || echo '[]')
           echo "blocked: $blocked"
 
           # (4) Remove blocked versions, pick the 0th (latest) remaining.
+          local picked picked_url picked_ver
           picked=$(jq -nc --argjson pairs "$pairs" --argjson blocked "$blocked" \
             '$pairs | map(select(.[1] as $v | ($blocked | index($v)) | not)) | .[0] // empty')
           if [ -z "$picked" ] || [ "$picked" = "null" ]; then
             echo "REJECTED $pkg@$ref: no compliant version after filtering"
-            echo "REJECTED $pkg@$ref no-compliant-version" >> "$verdicts"
+            printf 'REJECTED\t%s\t%s\t\t\tno-compliant-version\n' "$pkg" "$ref" >> "$verdicts"
             echo "::endgroup::"
-            continue
+            return 0
           fi
           picked_url=$(printf '%s' "$picked" | jq -r '.[0]')
           picked_ver=$(printf '%s' "$picked" | jq -r '.[1]')
           echo "selected: $picked_ver"
 
+          # Resolve the commit SHA for the selected version tag (used in job summary).
+          local commit_sha=""
+          commit_sha=$(gh api "repos/$pkg/commits/$picked_ver" --jq '.sha' 2>/dev/null || true)
+
           # (5) curation -> approve (200) or reject (403).
+          local cur_body cur_out cur_code cur_resp
           cur_body=$(jq -nc --arg pkg "$pkg" --arg url "$picked_url" '{package:$pkg, downloadUrl:$url}')
           cur_out="$(mktemp)"
           cur_code=$(curl -s -o "$cur_out" -w "%{http_code}" -X POST "$CURATION_URL" -H 'Content-Type: application/json' -d "$cur_body")
           cur_resp=$(cat "$cur_out"); rm -f "$cur_out"
           if [ "$cur_code" != "200" ]; then
             echo "REJECTED $pkg@$ref: curation $cur_code $cur_resp"
-            echo "REJECTED $pkg@$ref curation-$cur_code" >> "$verdicts"
+            printf 'REJECTED\t%s\t%s\t%s\t\tcuration-%s\n' "$pkg" "$ref" "$picked_ver" "$cur_code" >> "$verdicts"
             echo "::endgroup::"
-            continue
+            return 0
           fi
           echo "APPROVED $pkg@$ref -> $picked_ver"
 
           # (6) Enforce: replace the on-disk action with the approved version's contents.
-          echo "enforcing $picked_ver into $ref_dir"
-          find "$ref_dir" -mindepth 1 -delete
-          install_out="$(mktemp)"
-          if gacpm install --dest "$ref_dir" "$pkg@$picked_ver" >"$install_out" 2>&1; then
-            echo "installed $picked_ver into $ref_dir"
-            echo "APPROVED $pkg@$ref $picked_ver" >> "$verdicts"
+          # Skipped in check-only mode (ref_dir is empty).
+          if [ -n "$ref_dir" ]; then
+            echo "enforcing $picked_ver into $ref_dir"
+            find "$ref_dir" -mindepth 1 -delete
+            local install_out
+            install_out="$(mktemp)"
+            if gacpm install --dest "$ref_dir" "$pkg@$picked_ver" >"$install_out" 2>&1; then
+              echo "installed $picked_ver into $ref_dir"
+              printf 'APPROVED\t%s\t%s\t%s\t%s\tenforced\n' "$pkg" "$ref" "$picked_ver" "$commit_sha" >> "$verdicts"
+            else
+              echo "ERROR installing $picked_ver:"; cat "$install_out"
+              printf 'REJECTED\t%s\t%s\t%s\t%s\tinstall-failed\n' "$pkg" "$ref" "$picked_ver" "$commit_sha" >> "$verdicts"
+            fi
+            rm -f "$install_out"
           else
-            echo "ERROR installing $picked_ver:"; cat "$install_out"
-            echo "REJECTED $pkg@$ref install-failed" >> "$verdicts"
+            echo "check-only: approved $picked_ver (no on-disk enforcement)"
+            printf 'APPROVED\t%s\t%s\t%s\t%s\tcheck-only\n' "$pkg" "$ref" "$picked_ver" "$commit_sha" >> "$verdicts"
           fi
-          rm -f "$install_out"
+
           echo "::endgroup::"
-        done < <(find "$ACTIONS_DIR" -mindepth 3 -maxdepth 3 -type d)
+        }
+
+        verdicts="$(mktemp)"
+
+        if [ -n "${INPUT_ACTIONS:-}" ]; then
+          echo "Check-only mode: verifying explicit action list (no on-disk enforcement)"
+          while IFS= read -r _action_ref; do
+            _action_ref="${_action_ref#"${_action_ref%%[![:space:]]*}"}"
+            _action_ref="${_action_ref%"${_action_ref##*[![:space:]]}"}"
+            [[ -z "$_action_ref" ]] && continue
+            _owner=$(printf '%s' "$_action_ref" | cut -d/ -f1)
+            _repo=$(printf '%s' "$_action_ref" | cut -d/ -f2 | cut -d@ -f1)
+            _ref=$(printf '%s' "$_action_ref" | cut -d@ -f2)
+            gate_action "$_owner" "$_repo" "$_ref" ""
+          done <<< "${INPUT_ACTIONS}"
+        else
+          echo "Scanning $ACTIONS_DIR for third-party actions..."
+          if [ ! -d "$ACTIONS_DIR" ]; then
+            echo "No _actions directory found; nothing to gate."
+            exit 0
+          fi
+          # Process substitution keeps the loop in the current shell (so verdicts persist).
+          while IFS= read -r ref_dir; do
+            _owner=$(basename "$(dirname "$(dirname "$ref_dir")")")
+            _repo=$(basename "$(dirname "$ref_dir")")
+            _ref=$(basename "$ref_dir")
+            gate_action "$_owner" "$_repo" "$_ref" "$ref_dir"
+          done < <(find "$ACTIONS_DIR" -mindepth 3 -maxdepth 3 -type d)
+        fi
 
         echo "=== compliance summary ==="
         cat "$verdicts" 2>/dev/null || true
+
+        # Write a markdown summary table to the workflow job summary page.
+        {
+          echo "## Compliance Gate"
+          echo ""
+          echo "| Action | Requested | Selected Version | Commit SHA | Verdict |"
+          echo "| --- | --- | --- | --- | --- |"
+          while IFS=$'\t' read -r _status _pkg _ref _ver _sha _reason; do
+            case "$_status" in
+              APPROVED) _badge="✅ Approved" ;;
+              REJECTED) _badge="❌ Rejected — \`$_reason\`" ;;
+              *)        _badge="$_status" ;;
+            esac
+            _sha_short="${_sha:0:7}"
+            echo "| \`$_pkg\` | \`@$_ref\` | \`${_ver:----}\` | \`${_sha_short:----}\` | $_badge |"
+          done < "$verdicts"
+        } >> "$GITHUB_STEP_SUMMARY"
+
         if grep -q '^REJECTED' "$verdicts" 2>/dev/null; then
           echo "::error::compliance gate failed — one or more actions are non-compliant"
           exit 1

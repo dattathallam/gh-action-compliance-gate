@@ -34,7 +34,10 @@ jobs:
       #   tj-actions/changed-files      → v47     (floating tag, node — frequent releases)
       #   softprops/action-gh-release   → v3      (floating tag, node)
       #   dattathallam/gh-action-composite → v1   (floating tag, composite)
-      #   dattathallam/gh-action-node   → main    (branch)
+      #   dattathallam/gh-action-node   → main    (branch — all commits too recent, rejected)
+      #   hashicorp/setup-terraform     → main    (branch — 3 immature commits, pinned to May 28)
+      #   aquasecurity/trivy-action     → main    (branch — 6 immature commits, pinned to Jun 1)
+      #   sigstore/cosign-installer     → main    (branch — 2 immature commits, pinned to May 7)
       - name: Check action compliance
         uses: dattathallam/demo-compliance-action@main
         with:
@@ -79,6 +82,31 @@ jobs:
         if: false
         with:
           tag_name: demo-${{ github.run_number }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@main
+        with:
+          terraform_version: '1.9.0'
+
+      - name: Verify Terraform
+        run: terraform version
+
+      # Compliance reference only — step is skipped at runtime (if: false).
+      # aquasecurity/trivy-action@main: 6 of last 10 commits are immature,
+      # compliance pins to the newest commit older than min_age_days.
+      - name: Scan for vulnerabilities (compliance reference only)
+        uses: aquasecurity/trivy-action@main
+        if: false
+        with:
+          scan-type: fs
+          scan-ref: .
+
+      # Compliance reference only — step is skipped at runtime (if: false).
+      # sigstore/cosign-installer@main: 2 of last 10 commits are immature,
+      # compliance pins to the newest commit older than min_age_days.
+      - name: Install Cosign (compliance reference only)
+        uses: sigstore/cosign-installer@main
+        if: false
 
       - name: Run composite greeter
         uses: dattathallam/gh-action-composite@v1

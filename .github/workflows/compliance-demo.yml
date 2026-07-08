@@ -31,7 +31,7 @@ jobs:
       #   actions/cache                 → v4      (floating tag, node)
       #   tj-actions/changed-files      → v47     (floating tag, node — frequent releases)
       #   softprops/action-gh-release   → v3      (floating tag, node)
-      #   sigstore/cosign-installer     → v3.1    (floating tag, node)
+      #   sigstore/cosign-installer     → v3.1.0  (specific tag, node)
       #   dattathallam/gh-action-composite → v1   (floating tag, composite)
       #   dattathallam/gh-action-node   → main    (branch — all commits too recent, rejected)
       #   hashicorp/setup-terraform     → main    (branch — 3 immature commits, pinned to May 28)
@@ -92,9 +92,8 @@ jobs:
           scan-ref: .
 
       # Compliance reference only — step is skipped at runtime (if: false).
-      # sigstore/cosign-installer@v3.1: floating tag covering v3.1.0–v3.1.2.
       - name: Install Cosign (compliance reference only)
-        uses: sigstore/cosign-installer@v3.1
+        uses: sigstore/cosign-installer@v3.1.0
         if: false
 
       - name: Run composite greeter

@@ -28,16 +28,14 @@ jobs:
       # action that will be used even though it runs first.
       #
       # Actions evaluated (covering floating-tag, branch, and specific-tag refs):
-      #   actions/checkout              → v4      (floating tag, node)
-      #   actions/setup-node            → v4      (floating tag, node)
       #   actions/cache                 → v4      (floating tag, node)
       #   tj-actions/changed-files      → v47     (floating tag, node — frequent releases)
       #   softprops/action-gh-release   → v3      (floating tag, node)
+      #   sigstore/cosign-installer     → v3.1    (floating tag, node)
       #   dattathallam/gh-action-composite → v1   (floating tag, composite)
       #   dattathallam/gh-action-node   → main    (branch — all commits too recent, rejected)
       #   hashicorp/setup-terraform     → main    (branch — 3 immature commits, pinned to May 28)
       #   aquasecurity/trivy-action     → master  (branch — 6 immature commits, pinned to Jun 1)
-      #   sigstore/cosign-installer     → main    (branch — 2 immature commits, pinned to May 7)
       - name: Check action compliance
         uses: dattathallam/demo-compliance-action@main
         with:
@@ -47,14 +45,6 @@ jobs:
           fail_on_violation: 'true'
 
       # ── Real work ─────────────────────────────────────────────────────────
-
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
 
       - name: Cache npm dependencies
         uses: actions/cache@v4
@@ -92,7 +82,7 @@ jobs:
         run: terraform version
 
       # Compliance reference only — step is skipped at runtime (if: false).
-      # aquasecurity/trivy-action@main: 6 of last 10 commits are immature,
+      # aquasecurity/trivy-action@master: 6 of last 10 commits are immature,
       # compliance pins to the newest commit older than min_age_days.
       - name: Scan for vulnerabilities (compliance reference only)
         uses: aquasecurity/trivy-action@master
@@ -102,10 +92,9 @@ jobs:
           scan-ref: .
 
       # Compliance reference only — step is skipped at runtime (if: false).
-      # sigstore/cosign-installer@main: 2 of last 10 commits are immature,
-      # compliance pins to the newest commit older than min_age_days.
+      # sigstore/cosign-installer@v3.1: floating tag covering v3.1.0–v3.1.2.
       - name: Install Cosign (compliance reference only)
-        uses: sigstore/cosign-installer@main
+        uses: sigstore/cosign-installer@v3.1
         if: false
 
       - name: Run composite greeter

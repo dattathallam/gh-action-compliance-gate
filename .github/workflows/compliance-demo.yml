@@ -36,7 +36,7 @@ jobs:
       #   dattathallam/gh-action-composite → v1   (floating tag, composite)
       #   dattathallam/gh-action-node   → main    (branch — all commits too recent, rejected)
       #   hashicorp/setup-terraform     → main    (branch — 3 immature commits, pinned to May 28)
-      #   aquasecurity/trivy-action     → main    (branch — 6 immature commits, pinned to Jun 1)
+      #   aquasecurity/trivy-action     → master  (branch — 6 immature commits, pinned to Jun 1)
       #   sigstore/cosign-installer     → main    (branch — 2 immature commits, pinned to May 7)
       - name: Check action compliance
         uses: dattathallam/demo-compliance-action@main
@@ -95,7 +95,7 @@ jobs:
       # aquasecurity/trivy-action@main: 6 of last 10 commits are immature,
       # compliance pins to the newest commit older than min_age_days.
       - name: Scan for vulnerabilities (compliance reference only)
-        uses: aquasecurity/trivy-action@main
+        uses: aquasecurity/trivy-action@master
         if: false
         with:
           scan-type: fs

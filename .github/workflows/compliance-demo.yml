@@ -20,19 +20,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ── Real work ─────────────────────────────────────────────────────────
-      # This composite action internally uses dattathallam/gh-action-node@main
-      # and actions/checkout@v4, so all three ref types end up in _work/_actions:
+      # ── Compliance gate (runs first — can abort before any work executes) ──
+      # The runner pre-downloads ALL actions referenced in this workflow into
+      # _work/_actions before any step runs, so the compliance check sees every
+      # action that will be used even though it runs first.
+      #
+      # Actions that will be evaluated:
       #   dattathallam/gh-action-composite  →  v1       (floating tag)
       #   dattathallam/gh-action-node        →  main     (branch)
       #   actions/checkout                   →  v4       (floating tag)
-      - name: Run composite greeter
-        uses: dattathallam/gh-action-composite@v1
-        with:
-          name: 'Compliance Demo'
-          greeting: 'Hello from'
-
-      # ── Compliance gate ───────────────────────────────────────────────────
       - name: Check action compliance
         uses: dattathallam/demo-compliance-action@main
         with:
@@ -40,3 +36,10 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           min_age_days: ${{ inputs.min_age_days || '7' }}
           fail_on_violation: 'true'
+
+      # ── Real work ─────────────────────────────────────────────────────────
+      - name: Run composite greeter
+        uses: dattathallam/gh-action-composite@v1
+        with:
+          name: 'Compliance Demo'
+          greeting: 'Hello from'

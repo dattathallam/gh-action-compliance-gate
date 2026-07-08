@@ -31,8 +31,8 @@ jobs:
       #   actions/checkout              → v4      (floating tag, node)
       #   actions/setup-node            → v4      (floating tag, node)
       #   actions/cache                 → v4      (floating tag, node)
-      #   tj-actions/changed-files      → v46     (floating tag, node — frequent releases)
-      #   softprops/action-gh-release   → v2      (floating tag, node)
+      #   tj-actions/changed-files      → v47     (floating tag, node — frequent releases)
+      #   softprops/action-gh-release   → v3      (floating tag, node)
       #   dattathallam/gh-action-composite → v1   (floating tag, composite)
       #   dattathallam/gh-action-node   → main    (branch)
       - name: Check action compliance
@@ -63,7 +63,7 @@ jobs:
 
       - name: Get changed files
         id: changed
-        uses: tj-actions/changed-files@v46
+        uses: tj-actions/changed-files@v47
         with:
           since_last_remote_commit: true
 
@@ -78,7 +78,7 @@ jobs:
           echo "Built from \`$GITHUB_SHA\`" >> /tmp/release-notes.md
 
       - name: Publish draft release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         if: github.ref == 'refs/heads/main'
         with:
           tag_name: demo-${{ github.run_number }}

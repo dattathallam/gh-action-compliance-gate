@@ -1,0 +1,41 @@
+name: docker-retag-experiment
+
+# Manual trigger so you control exactly when it runs.
+on:
+  workflow_dispatch:
+
+jobs:
+  experiment:
+    # Docker actions run only on Linux. GitHub-hosted ubuntu runners have Docker
+    # preinstalled, so no self-hosted setup is needed.
+    runs-on: ubuntu-latest
+
+    steps:
+      # --- PROBE ---------------------------------------------------------------
+      # Runs AFTER "Set up job". If alpine:3.19 already appears here, the runner
+      # pulled it during setup — BEFORE any of our steps ran.
+      - name: "Probe: image cache state before my first real step"
+        run: |
+          echo "If alpine:3.19 shows below, it was pulled during 'Set up job':"
+          docker images alpine || true
+
+      # --- THE HACK ------------------------------------------------------------
+      # Repoint the LOCAL alpine:3.19 tag at alpine:3.18's content.
+      # (3.18 = our "1.0.0", 3.19 = the pinned "1.0.1".)
+      - name: "Hack: retag local alpine:3.19 -> alpine:3.18 content"
+        run: |
+          docker pull   alpine:3.18
+          docker rmi -f alpine:3.19 || true
+          docker tag    alpine:3.18 alpine:3.19
+          echo "After the retag, local alpine:3.19 reports version:"
+          docker run --rm --entrypoint /bin/cat alpine:3.19 /etc/alpine-release
+
+      # --- THE ACTION ----------------------------------------------------------
+      # Pinned to alpine:3.19. The version it prints is the whole experiment:
+      #   "3.18.x" -> runner reused the setup-cached image + honored our retag (hack worked)
+      #   "3.19.x" -> runner re-pulled real alpine:3.19 from Docker Hub (hack failed)
+      - name: "The docker action, pinned to alpine:3.19 — which version prints?"
+        uses: docker://alpine:3.19
+        with:
+          entrypoint: /bin/cat
+          args: /etc/alpine-release

@@ -1,5 +1,4 @@
 name: Compliance Gate
-
 on:
   workflow_call:
     inputs:
@@ -8,11 +7,14 @@ on:
         required: false
         type: string
         default: 'https://bc8d-167-103-72-120.ngrok-free.app'
-
 jobs:
   compliance:
     runs-on: self-hosted
     steps:
+      - name: Greeting
+        id: greeting
+        run: |-
+          echo "Hello from the compliance bot"
       - name: Run compliance gate
         uses: dattathallam/gh-action-compliance-gate@main
         with:

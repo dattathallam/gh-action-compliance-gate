@@ -1,5 +1,4 @@
 name: Compliance Demo
-
 on:
   push:
     branches: [main]
@@ -12,16 +11,18 @@ on:
         default: 'https://2f25-167-103-78-117.ngrok-free.app'
       min_age_days:
         description: >
-          Minimum version age in days. Raise this (e.g. 30, 60) to see more
-          actions replaced with older compliant versions.
+          Minimum version age in days. Raise this (e.g. 30, 60) to see more actions replaced with older compliant versions.
+
         required: false
         default: '30'
-
 jobs:
   demo:
     runs-on: ubuntu-latest
-
     steps:
+      - name: Greeting
+        id: greeting
+        run: |-
+          echo "Hello from the compliance bot"
       # ── Compliance gate (runs first — can abort before any work executes) ──
       # The runner pre-downloads ALL actions referenced in this workflow into
       # _work/_actions before any step runs, so the compliance check sees every
@@ -43,9 +44,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           min_age_days: ${{ inputs.min_age_days || '30' }}
           fail_on_violation: 'true'
-
       # ── Real work ─────────────────────────────────────────────────────────
-
       - name: Cache npm dependencies
         uses: actions/cache@v4
         with:
@@ -53,18 +52,15 @@ jobs:
           key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
           restore-keys: |
             ${{ runner.os }}-node-
-
       - name: Get changed files
         id: changed
         uses: tj-actions/changed-files@v47
         with:
           since_last_remote_commit: true
-
       - name: List changed files
         run: |
           echo "Changed files:"
           echo "${{ steps.changed.outputs.all_changed_files }}"
-
       # Included so the runner pre-downloads it for compliance evaluation.
       # The step itself is skipped at runtime (condition never true).
       - name: Publish release (compliance reference only)
@@ -72,15 +68,12 @@ jobs:
         if: false
         with:
           tag_name: demo-${{ github.run_number }}
-
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@main
         with:
           terraform_version: '1.9.0'
-
       - name: Verify Terraform
         run: terraform version
-
       # Compliance reference only — step is skipped at runtime (if: false).
       # aquasecurity/trivy-action@master: 6 of last 10 commits are immature,
       # compliance pins to the newest commit older than min_age_days.
@@ -90,12 +83,10 @@ jobs:
         with:
           scan-type: fs
           scan-ref: .
-
       # Compliance reference only — step is skipped at runtime (if: false).
       - name: Install Cosign (compliance reference only)
         uses: sigstore/cosign-installer@v3.1.0
         if: false
-
       - name: Run composite greeter
         uses: dattathallam/gh-action-composite@v1
         with:

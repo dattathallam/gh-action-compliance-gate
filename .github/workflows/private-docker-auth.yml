@@ -1,0 +1,96 @@
+name: private-docker-auth
+
+# Demonstrates the three ways a GitHub-hosted runner interacts with a PRIVATE
+# container image (hosted here in JFrog Artifactory 'docker-local'), and proves
+# WHEN each image is pulled relative to the login.
+#
+# Image under test: z0dtd2c21071047.jfrogdev.org/docker-local/compliance-check:1.0
+#   (linux/amd64; entrypoint prints a banner + alpine version + args, then exits 0)
+#
+# Required repo secrets (Settings > Secrets and variables > Actions):
+#   ARTIFACTORY_USERNAME   e.g. admin
+#   ARTIFACTORY_PASSWORD   the Artifactory password / access token
+#
+# Expected outcomes when you run this:
+#   job-a  ❌ FAILS at "Set up job" — the runner pulls the docker:// step-action
+#            image during the PREPARE phase, before the login step ever runs.
+#            (continue-on-error keeps the workflow going so you can see b and c.)
+#   job-b  ✅ PASSES — login is a step, and the pull happens later inside a
+#            run: step (docker run), so ordering is under your control.
+#   job-c  ✅ PASSES — the private image is a job container; the prepare-phase
+#            pull is authenticated by the in-YAML credentials: block.
+
+on:
+  workflow_dispatch:
+
+env:
+  REGISTRY: z0dtd2c21071047.jfrogdev.org
+  # NOTE: `uses:` does NOT support ${{ }} expressions, so job-a hardcodes the
+  # full image reference. Keep this env in sync with that literal.
+  IMAGE: z0dtd2c21071047.jfrogdev.org/docker-local/compliance-check:1.0
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # A) login STEP before a private docker:// action STEP.
+  #    This is the tempting-but-broken pattern. The image is pulled during the
+  #    prepare phase (before any step runs), so the login step is too late and
+  #    the job fails during "Set up job" with an auth/manifest error.
+  # ---------------------------------------------------------------------------
+  job-a-login-step-then-action:
+    name: "A: login step then docker:// action (expected to FAIL)"
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Log in to Artifactory (runs AFTER the prepare-phase pull — too late)
+        uses: docker/login-action@v3
+        with:
+          registry: z0dtd2c21071047.jfrogdev.org
+          username: ${{ secrets.ARTIFACTORY_USERNAME }}
+          password: ${{ secrets.ARTIFACTORY_PASSWORD }}
+
+      # Prepare phase already tried (and failed) to pull this before step 1.
+      - name: Run private image as a step action
+        uses: docker://z0dtd2c21071047.jfrogdev.org/docker-local/compliance-check:1.0
+        with:
+          args: hello-from-job-a
+
+  # ---------------------------------------------------------------------------
+  # B) Manual login + docker run inside a run: step.
+  #    The reliable "lazy" path: you own the ordering, so the pull happens after
+  #    the login, at step-execution time.
+  # ---------------------------------------------------------------------------
+  job-b-manual-login-then-run:
+    name: "B: manual login + docker run (expected to PASS)"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to Artifactory
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.ARTIFACTORY_USERNAME }}
+          password: ${{ secrets.ARTIFACTORY_PASSWORD }}
+
+      - name: Pull + run the private image ourselves
+        run: |
+          echo "Pulling and running $IMAGE via docker run (host creds already set)..."
+          docker run --rm "$IMAGE" hello-from-job-b
+
+  # ---------------------------------------------------------------------------
+  # C) Private image as the JOB CONTAINER, authenticated via credentials:.
+  #    The prepare phase pulls it using the in-YAML credentials, then every step
+  #    runs INSIDE the private image. This is the in-YAML mechanism that a login
+  #    step cannot replace.
+  # ---------------------------------------------------------------------------
+  job-c-container-credentials:
+    name: "C: job container with credentials (expected to PASS)"
+    runs-on: ubuntu-latest
+    container:
+      image: z0dtd2c21071047.jfrogdev.org/docker-local/compliance-check:1.0
+      credentials:
+        username: ${{ secrets.ARTIFACTORY_USERNAME }}
+        password: ${{ secrets.ARTIFACTORY_PASSWORD }}
+    steps:
+      - name: Prove we are inside the private image
+        run: |
+          echo "This step runs inside the private container image."
+          echo "alpine-release: $(cat /etc/alpine-release)"

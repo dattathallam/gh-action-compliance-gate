@@ -1,0 +1,37 @@
+name: publish-test-image
+
+# Builds test-image/Dockerfile and pushes it to GHCR as a PRIVATE package,
+# using the repo's GITHUB_TOKEN (which carries packages: write). Run this once
+# before the private-docker-auth workflow.
+#
+# Result: ghcr.io/<owner>/compliance-check:1.0  (linux/amd64)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./test-image
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/compliance-check:1.0
+          provenance: false
+          sbom: false

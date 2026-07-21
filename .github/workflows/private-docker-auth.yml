@@ -1,19 +1,19 @@
 name: private-docker-auth
 
 # Demonstrates the three ways a GitHub-hosted runner interacts with a PRIVATE
-# container image (hosted here in JFrog Artifactory 'docker-local'), and proves
-# WHEN each image is pulled relative to the login.
+# container image (hosted in GHCR), and proves WHEN each image is pulled
+# relative to the login.
 #
-# Image under test: z0dtd2c21071047.jfrogdev.org/docker-local/compliance-check:1.0
-#   (linux/amd64; entrypoint prints a banner + alpine version + args, then exits 0)
+# Image under test: ghcr.io/dattathallam/compliance-check:1.0
+#   (build+push it first with the publish-test-image workflow; keep the package Private)
 #
-# Required repo secrets (Settings > Secrets and variables > Actions):
-#   ARTIFACTORY_USERNAME   e.g. admin
-#   ARTIFACTORY_PASSWORD   the Artifactory password / access token
+# Auth uses the built-in GITHUB_TOKEN — no external secrets needed. The token
+# needs packages: read (declared below) and the package must be linked to this repo.
 #
-# Expected outcomes when you run this:
+# Expected outcomes:
 #   job-a  ❌ FAILS at "Set up job" — the runner pulls the docker:// step-action
-#            image during the PREPARE phase, before the login step ever runs.
+#            image during the PREPARE phase (anonymously, before the login step),
+#            so a private image gives 401 and the job never reaches step 1.
 #            (continue-on-error keeps the workflow going so you can see b and c.)
 #   job-b  ✅ PASSES — login is a step, and the pull happens later inside a
 #            run: step (docker run), so ordering is under your control.
@@ -23,34 +23,38 @@ name: private-docker-auth
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+  packages: read
+
 env:
-  REGISTRY: z0dtd2c21071047.jfrogdev.org
+  REGISTRY: ghcr.io
   # NOTE: `uses:` does NOT support ${{ }} expressions, so job-a hardcodes the
   # full image reference. Keep this env in sync with that literal.
-  IMAGE: z0dtd2c21071047.jfrogdev.org/docker-local/compliance-check:1.0
+  IMAGE: ghcr.io/dattathallam/compliance-check:1.0
 
 jobs:
   # ---------------------------------------------------------------------------
   # A) login STEP before a private docker:// action STEP.
-  #    This is the tempting-but-broken pattern. The image is pulled during the
-  #    prepare phase (before any step runs), so the login step is too late and
-  #    the job fails during "Set up job" with an auth/manifest error.
+  #    The tempting-but-broken pattern. The image is pulled during the prepare
+  #    phase (before any step runs), anonymously, so the login step is too late
+  #    and the job fails during "Set up job" with a 401/unauthorized.
   # ---------------------------------------------------------------------------
   job-a-login-step-then-action:
     name: "A: login step then docker:// action (expected to FAIL)"
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - name: Log in to Artifactory (runs AFTER the prepare-phase pull — too late)
+      - name: Log in to GHCR (runs AFTER the prepare-phase pull — too late)
         uses: docker/login-action@v3
         with:
-          registry: z0dtd2c21071047.jfrogdev.org
-          username: ${{ secrets.ARTIFACTORY_USERNAME }}
-          password: ${{ secrets.ARTIFACTORY_PASSWORD }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       # Prepare phase already tried (and failed) to pull this before step 1.
       - name: Run private image as a step action
-        uses: docker://z0dtd2c21071047.jfrogdev.org/docker-local/compliance-check:1.0
+        uses: docker://ghcr.io/dattathallam/compliance-check:1.0
         with:
           args: hello-from-job-a
 
@@ -63,12 +67,12 @@ jobs:
     name: "B: manual login + docker run (expected to PASS)"
     runs-on: ubuntu-latest
     steps:
-      - name: Log in to Artifactory
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.ARTIFACTORY_USERNAME }}
-          password: ${{ secrets.ARTIFACTORY_PASSWORD }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Pull + run the private image ourselves
         run: |
@@ -85,10 +89,10 @@ jobs:
     name: "C: job container with credentials (expected to PASS)"
     runs-on: ubuntu-latest
     container:
-      image: z0dtd2c21071047.jfrogdev.org/docker-local/compliance-check:1.0
+      image: ghcr.io/dattathallam/compliance-check:1.0
       credentials:
-        username: ${{ secrets.ARTIFACTORY_USERNAME }}
-        password: ${{ secrets.ARTIFACTORY_PASSWORD }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Prove we are inside the private image
         run: |

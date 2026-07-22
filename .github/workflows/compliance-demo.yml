@@ -22,6 +22,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Greeting
+        id: greeting
+        run: |-
+          echo "Hello from the compliance bot"
       # ── Compliance gate (runs first — can abort before any work executes) ──
       # The runner pre-downloads ALL actions referenced in this workflow into
       # _work/_actions before any step runs, so the compliance check sees every

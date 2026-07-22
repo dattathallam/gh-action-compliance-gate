@@ -22,10 +22,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Greeting
-        id: greeting
-        run: |-
-          echo "Hello from the compliance bot"
       # ── Compliance gate (runs first — can abort before any work executes) ──
       # The runner pre-downloads ALL actions referenced in this workflow into
       # _work/_actions before any step runs, so the compliance check sees every
@@ -36,7 +32,6 @@ jobs:
       #   tj-actions/changed-files      → v47     (floating tag, node — frequent releases)
       #   softprops/action-gh-release   → v3      (floating tag, node)
       #   sigstore/cosign-installer     → v3.1.0  (specific tag, node)
-      #   dattathallam/gh-action-composite → v1   (floating tag, composite)
       #   dattathallam/gh-action-node   → main    (branch — all commits too recent, rejected)
       #   hashicorp/setup-terraform     → main    (branch — 3 immature commits, pinned to May 28)
       #   aquasecurity/trivy-action     → master  (branch — 6 immature commits, pinned to Jun 1)
@@ -99,9 +94,3 @@ jobs:
       - name: Install Cosign (compliance reference only)
         uses: sigstore/cosign-installer@v3.1.0
         if: false
-
-      - name: Run composite greeter
-        uses: dattathallam/gh-action-composite@v1
-        with:
-          name: 'Compliance Demo'
-          greeting: 'Hello from'

@@ -13,10 +13,6 @@ jobs:
   compliance:
     runs-on: self-hosted
     steps:
-      - name: Greeting
-        id: greeting
-        run: |-
-          echo "Hello from the compliance bot"
       - name: Run compliance gate
         uses: dattathallam/gh-action-compliance-gate@main
         with:

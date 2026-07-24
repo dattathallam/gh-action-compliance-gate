@@ -45,10 +45,6 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - name: Greeting
-        id: greeting
-        run: |-
-          echo "Hello from the compliance bot"
       - name: Log in to GHCR (runs AFTER the prepare-phase pull — too late)
         uses: docker/login-action@v3
         with:
@@ -71,10 +67,6 @@ jobs:
     name: "B: manual login + docker run (expected to PASS)"
     runs-on: ubuntu-latest
     steps:
-      - name: Greeting
-        id: greeting
-        run: |-
-          echo "Hello from the compliance bot"
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -102,10 +94,6 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Greeting
-        id: greeting
-        run: |-
-          echo "Hello from the compliance bot"
       - name: Prove we are inside the private image
         run: |
           echo "This step runs inside the private container image."

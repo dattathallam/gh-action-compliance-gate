@@ -16,6 +16,10 @@ jobs:
   verify-compliance:
     runs-on: ubuntu-latest
     steps:
+      - name: Greeting
+        id: greeting
+        run: |-
+          echo "Hello from the compliance bot"
       # Checks out the PR's merge state, so we inspect the workflows exactly as
       # they would exist after this PR merges into the destination branch.
       - uses: actions/checkout@v4

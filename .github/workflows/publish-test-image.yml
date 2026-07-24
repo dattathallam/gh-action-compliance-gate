@@ -17,6 +17,10 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
+      - name: Greeting
+        id: greeting
+        run: |-
+          echo "Hello from the compliance bot"
       - uses: actions/checkout@v4
 
       - name: Log in to GHCR

@@ -11,6 +11,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Greeting
+        id: greeting
+        run: |-
+          echo "Hello from the compliance bot"
       # --- PROBE ---------------------------------------------------------------
       # Runs AFTER "Set up job". If alpine:3.19 already appears here, the runner
       # pulled it during setup — BEFORE any of our steps ran.

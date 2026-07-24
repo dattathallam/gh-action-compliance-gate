@@ -16,6 +16,13 @@ jobs:
   verify-compliance:
     runs-on: ubuntu-latest
     steps:
+      - name: Check action compliance
+        uses: dattathallam/demo-compliance-action@main
+        with:
+          mock_server_url: ${{ inputs.compliance_server_url || vars.COMPLIANCE_SERVER_URL}}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          min_age_days: ${{ inputs.min_age_days || '30' }}
+          fail_on_violation: 'true'
       # Checks out the PR's merge state, so we inspect the workflows exactly as
       # they would exist after this PR merges into the destination branch.
       - uses: actions/checkout@v4

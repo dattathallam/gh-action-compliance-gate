@@ -22,7 +22,7 @@ runs:
   using: 'composite'
   steps:
     # Step 1: the runner must already have gacpm (built from gh-action-compliance), gh, jq, curl.
-    - name: Preflight tooling
+    - name: Preflight tooling1
       shell: bash
       run: |
         missing=0
